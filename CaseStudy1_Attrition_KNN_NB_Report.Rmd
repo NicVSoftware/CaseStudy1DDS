@@ -1,0 +1,599 @@
+---
+title: "Employee Attrition Modeling: KNN vs Naive Bayes"
+author: "Nicholas Vandra"
+date: "2025-10-26"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: readable
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, 
+  message = FALSE, 
+  warning = FALSE, 
+  fig.width = 8, 
+  fig.height = 5
+)
+set.seed(6306)
+```
+
+# Introduction
+
+This report reproduces and documents a complete end-to-end classification workflow to predict employee **Attrition** using two classifiers: **K-Nearest Neighbors (KNN)** and **Naive Bayes (NB)**. The analysis follows these stages:
+
+1. Data loading and cleaning  
+2. Exploratory Data Analysis (EDA): class balance, missing data, demographics, correlations  
+3. Train/validation split and preprocessing 
+4. Model training (KNN, Naive Bayes)  
+5. Threshold calibration and metrics (Accuracy, Sensitivity, Specificity, ROC AUC)  
+6. Comparative evaluation and visualization (ROC curves)  
+7. (Optional) Logistic Regression for feature importance/interpretability
+
+All code is built on the **tidyverse/tidymodels** ecosystem and uses your original variable names and transformations.
+
+# Libraries & Global Options
+
+```{r libraries}
+library(tidyverse)
+library(tidymodels)
+library(data.table)
+library(janitor)
+library(GGally)
+library(vip)
+library(performance)
+library(probably)
+library(finetune)
+library(themis)
+library(kableExtra)
+library(skimr)
+library(pROC)
+library(corrplot)
+library(reshape2)
+library(ggthemes)
+library(discrim)
+library(kknn)
+library(naivebayes)
+library(broom)
+library(dplyr)
+library(ggplot2)
+library(yardstick)
+
+theme_set(theme_minimal(base_size = 12))
+tidymodels_prefer()
+```
+
+> **Note:** If any package is missing, install it via `install.packages('package_name')` (or for tidymodels add-ons, check CRAN).
+
+# Parameters & File Paths
+
+These parameters are preserved from your script for transparency and reproducibility.
+
+```{r parameters}
+last_name      <- "Vandra"
+incentive_cost <- 200
+min_sens       <- 0.60
+min_spec       <- 0.60
+replacement_factor <- 1.00
+
+train_path <- "C:/Users/nicva/OneDrive/Desktop/Doing Data Science/Project 1/Data/CaseStudy1-data.csv"
+comp_path  <- "C:/Users/nicva/OneDrive/Desktop/Doing Data Science/Project 1/Data/CaseStudy1CompSet No Attrition.csv"
+id_col_raw <- "ID"
+target_col <- "Attrition"
+
+# For convenience after clean_names()
+id_col    <- tolower(id_col_raw)   # "id"
+targetcol <- tolower(target_col)   # "attrition"
+```
+
+# Data Loading & Initial Cleaning
+
+```{r load-clean}
+# Load and clean dataset
+train_raw <- readr::read_csv(train_path, show_col_types = FALSE) %>% janitor::clean_names()
+comp_raw  <- readr::read_csv(comp_path,  show_col_types = FALSE) %>% janitor::clean_names()
+
+# Helper Function: re-level the outcome so positive class Yes is first
+as_pos_class <- function(x) forcats::fct_relevel(factor(x), "Yes", "No")
+
+# Apply to training data
+train_df <- train_raw %>%
+  mutate(!!targetcol := as_pos_class(.data[[targetcol]]))
+
+# Quick schema overview
+skimr::skim(train_df)
+```
+
+## Missing Data Summary
+
+```{r missingdata}
+missing_summary <- train_df %>%
+  summarise(across(everything(), ~ sum(is.na(.x)))) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "missing") %>%
+  mutate(percent_missing = (missing / nrow(train_df)) * 100) %>%
+  arrange(desc(percent_missing))
+
+missing_summary %>%
+  mutate(missing = scales::comma(missing),
+         percent_missing = sprintf("%.2f%%", percent_missing)) %>%
+  knitr::kable(caption = "Missing Values by Variable", align = "lrr") %>%
+  kableExtra::kable_styling(full_width = FALSE)
+```
+
+## Class Distribution
+
+```{r class-dist}
+class_dist <- train_df %>%
+  count(.data[[targetcol]]) %>%
+  mutate(percent = n / sum(n) * 100)
+
+class_dist %>%
+  mutate(percent = sprintf("%.1f%%", percent)) %>%
+  knitr::kable(caption = "Attrition Class Distribution", align = "lrr") %>%
+  kableExtra::kable_styling(full_width = FALSE)
+```
+
+# Exploratory Data Analysis (EDA)
+
+## Dataset Completeness
+
+```{r completeness-plot, fig.height=4}
+total_missing  <- sum(missing_summary$missing)
+total_features <- nrow(missing_summary)
+total_cells    <- nrow(train_df) * total_features
+pct_complete   <- 100 * (1 - total_missing / total_cells)
+
+ggplot(data.frame(Completeness = pct_complete), aes(x = "Data", y = Completeness)) +
+  geom_col(fill = "lightskyblue1", width = 0.5) +
+  geom_text(aes(label = paste0(round(Completeness, 1), "% Complete")),
+            vjust = -0.5, size = 5, fontface = "bold", color = "#4B0082") +
+  scale_y_continuous(limits = c(0, 100), expand = c(0, 0)) +
+  labs(
+    title = "Dataset Completeness",
+    subtitle = "All records and features are fully populated",
+    x = NULL, y = "Percent Complete"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid.major.x = element_blank())
+```
+
+## Attrition Distribution
+
+```{r attrition-dist}
+train_df %>%
+  count(attrition) %>%
+  mutate(percent = n / sum(n) * 100) %>%
+  ggplot(aes(x = attrition, y = percent, fill = attrition)) +
+  geom_col(width = 0.6) +
+  geom_text(aes(label = paste0(round(percent, 1), "%")),
+            vjust = -0.3, size = 5, fontface = "bold", color = "black") +
+  scale_y_continuous(limits = c(0, 90)) +
+  scale_fill_manual(values = c("#F8766D", "#00BFC4")) +
+  labs(title = "Attrition Distribution", x = "Attrition", y = "Percentage") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none")
+```
+
+## Demographics
+
+### Age by Attrition
+
+```{r age-attrition}
+train_df %>%
+  ggplot(aes(x = attrition, y = age, fill = attrition)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(x = "Attrition", y = "Age") +
+  scale_y_continuous(limits = c(0, 90)) +
+  scale_fill_manual(values = c("red1", "steelblue2")) +
+  theme_minimal()
+```
+
+### Education vs Attrition
+
+```{r education-attrition}
+train_df %>%
+  group_by(education, attrition) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(education) %>%
+  mutate(percent = count / sum(count) * 100) %>%
+  ungroup() %>%
+  mutate(
+    education = factor(
+      education,
+      levels = c(1, 2, 3, 4, 5),
+      labels = c("Below College","College","Bachelor’s","Master’s","Doctorate")
+    )
+  ) %>%
+  ggplot(aes(x = education, y = percent, fill = attrition)) +
+  geom_col(position = "dodge", width = 0.7) +
+  geom_text(aes(label = sprintf("%.1f%%", percent)),
+            position = position_dodge(width = 0.7),
+            vjust = -0.3, size = 3) +
+  scale_fill_manual(values = c("Yes" = "blue4", "No" = "gold4")) +
+  labs(subtitle = "Percentage of employees who left the company",
+       x = "Education Level", y = "Attrition Rate (%)") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top") +
+  ylim(0, 40)
+```
+
+### Monthly Income vs Attrition
+
+```{r income-attrition}
+train_df %>%
+  ggplot(aes(x = attrition, y = monthly_income, fill = attrition)) +
+  geom_violin(trim = FALSE, alpha = 0.6) +
+  geom_boxplot(width = 0.1, fill = "white", outlier.shape = NA) +
+  scale_fill_manual(values = c("powderblue", "peachpuff")) +
+  labs(x = "Attrition", y = "Monthly Income") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+### Job Level vs Attrition
+
+```{r joblevel-attrition}
+train_df %>%
+  group_by(job_level, attrition) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  mutate(percent = count / sum(count) * 100) %>%
+  ggplot(aes(x = factor(job_level), y = percent, fill = attrition)) +
+  geom_col(position = "dodge", width = 0.7) +
+  geom_text(aes(label = sprintf("%.1f%%", percent)),
+            position = position_dodge(width = 0.7),
+            vjust = -0.4, size = 3.5, fontface = "bold") +
+  scale_fill_manual(values = c("Yes" = "#F8766D", "No" = "gray80"),
+                    name = "Attrition") +
+  labs(x = "Job Level", y = "Percentage of Employees") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top") +
+  ylim(0, 40)
+```
+
+### Distance from Home (Average) by Attrition
+
+```{r distance-attrition}
+train_df %>%
+  group_by(attrition) %>%
+  summarise(avg_distance = mean(distance_from_home, na.rm = TRUE)) %>%
+  ggplot(aes(x = attrition, y = avg_distance, fill = attrition)) +
+  geom_col(width = 0.6) +
+  geom_text(aes(label = sprintf("%.1f miles", avg_distance)),
+            vjust = -0.3, fontface = "bold", size = 4) +
+  scale_fill_manual(values = c("Yes" = "thistle1", "No" = "lightgoldenrod3"),
+                    name = "Attrition") +
+  labs(x = "Attrition", y = "Average Distance (miles)") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top") +
+  ylim(0, max(train_df$distance_from_home, na.rm = TRUE) * 1.1)
+```
+
+### Job Role vs Attrition
+
+```{r jobrole-attrition, fig.height=6}
+train_df %>%
+  group_by(job_role, attrition) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  mutate(percent = count / sum(count) * 100) %>%
+  ggplot(aes(x = reorder(job_role, percent), y = percent, fill = attrition)) +
+  geom_col(position = "dodge", width = 0.7) +
+  geom_text(aes(label = sprintf("%.1f%%", percent)),
+            position = position_dodge(width = 0.7),
+            hjust = -0.2, size = 3.5, fontface = "bold") +
+  coord_flip() +
+  scale_fill_manual(values = c("Yes" = "#F8766D", "No" = "#00BFC4"),
+                    name = "Attrition") +
+  labs(x = "Job Role", y = "Percentage of Employees") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top") +
+  ylim(0, 35)
+```
+
+### Overtime vs Attrition
+
+```{r overtime-attrition}
+train_df %>%
+  group_by(over_time, attrition) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  mutate(percent = count / sum(count) * 100) %>%
+  ggplot(aes(x = over_time, y = percent, fill = attrition)) +
+  geom_col(position = "dodge", width = 0.6) +
+  geom_text(aes(label = sprintf("%.1f%%", percent)),
+            position = position_dodge(width = 0.6),
+            vjust = -0.4, size = 4, fontface = "bold") +
+  scale_fill_manual(values = c("Yes" = "#F8766D", "No" = "#00BFC4"), name = "Attrition") +
+  labs(x = "Overtime Status", y = "Percentage of Employees") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top") +
+  ylim(0, 90)
+```
+
+## Correlations
+
+```{r correlations, fig.height=6}
+# Select numeric columns with non-zero variance
+num_cols <- train_df %>%
+  select(where(is.numeric)) %>%
+  select(where(~ sd(.x, na.rm = TRUE) > 0)) %>%
+  names()
+
+corr_matrix <- cor(train_df[, num_cols], use = "pairwise.complete.obs")
+corr_long <- reshape2::melt(corr_matrix)
+
+ggplot(corr_long, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "red", mid = "white", high = "blue",
+                       midpoint = 0, limit = c(-1,1), name = "Corr") +
+  labs(title = "Correlation Between Numeric Features", x = NULL, y = NULL) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+        axis.text.y = element_text(size = 8))
+```
+
+```{r focused-cor}
+num_vars <- train_df %>%
+  select(age, monthly_income, years_at_company, distance_from_home)
+
+corr_mat <- cor(num_vars, use = "pairwise.complete.obs")
+corr_long2 <- reshape2::melt(corr_mat)
+
+ggplot(corr_long2, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.2f", value)), color = "black", size = 4) +
+  scale_fill_gradient2(low = "#F8766D", mid = "white", high = "#00BFC4",
+                       midpoint = 0, limits = c(-1, 1), name = "Correlation") +
+  labs(x = NULL, y = NULL) +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.grid = element_blank())
+```
+
+# Modeling Pipeline
+
+## Train/Validation Split and Cross-Validation
+
+```{r split-cv}
+split    <- initial_split(train_df, prop = 0.8, strata = all_of(targetcol))
+train    <- training(split)
+valid    <- testing(split)
+cv_folds <- vfold_cv(train, v = 10, strata = all_of(targetcol))
+
+# Drop ID, Constants, and Leaky Columns
+drop_cols <- intersect(c(id_col, "employee_count", "standard_hours", "over18"), names(train))
+
+# Ordinal Integers per Data Dictionary
+ordinals <- intersect(c(
+  "education","environment_satisfaction","job_involvement","job_satisfaction",
+  "performance_rating","relationship_satisfaction","work_life_balance",
+  "stock_option_level","job_level"
+), names(train))
+```
+
+## Preprocessing Recipe
+
+All preprocessing steps are included: converting ordinals to factors, removing zero-variance features, imputing missingness, normalizing numerics, one-hot encoding categoricals, and **upsampling** to balance classes in training.
+
+```{r recipe}
+base_recipe <- recipe(
+  reformulate(termlabels = setdiff(names(train), c(drop_cols, targetcol)),
+              response = targetcol),
+  data = train
+) %>%
+  step_mutate(across(all_of(ordinals), ~ factor(.x))) %>%
+  step_zv(all_predictors()) %>%
+  step_novel(all_nominal_predictors()) %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_impute_mode(all_nominal_predictors()) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  step_upsample(all_outcomes(), over_ratio = 1)
+```
+
+## Models & Workflows
+
+```{r models-workflows}
+# KNN
+knn_spec <- nearest_neighbor(
+  mode        = "classification",
+  neighbors   = 5,
+  weight_func = "rectangular"
+) %>% set_engine("kknn")
+
+# Naive Bayes (with Laplace smoothing)
+nb_spec <- naive_Bayes(mode = "classification", smoothness = 1) %>%
+  set_engine("naivebayes")
+
+# Workflows
+knn_wf <- workflow() %>% add_model(knn_spec) %>% add_recipe(base_recipe)
+nb_wf  <- workflow() %>% add_model(nb_spec)  %>% add_recipe(base_recipe)
+```
+
+## Fit Models
+
+```{r fit-models}
+final_knn <- fit(knn_wf, data = train)
+final_nb  <- fit(nb_wf,  data = train)
+```
+
+## Validation Predictions
+
+```{r preds}
+pred_knn <- predict(final_knn, valid, type = "prob") %>%
+  bind_cols(predict(final_knn, valid, type = "class")) %>%
+  rename(pred_class = .pred_class) %>%
+  bind_cols(valid %>% select(all_of(targetcol)))
+
+pred_nb <- predict(final_nb, valid, type = "prob") %>%
+  bind_cols(predict(final_nb, valid, type = "class")) %>%
+  rename(pred_class = .pred_class) %>%
+  bind_cols(valid %>% select(all_of(targetcol)))
+```
+
+## Metrics Helpers
+
+```{r metrics-helpers}
+cls_metrics <- metric_set(accuracy, sensitivity, specificity)
+
+summarize_model <- function(pred_df, label){
+  core <- cls_metrics(pred_df, truth = .data[[targetcol]], estimate = pred_class,
+                      event_level = "first")
+  auc  <- roc_auc(pred_df, truth = .data[[targetcol]], .pred_Yes)
+  out  <- bind_rows(core, auc) %>% mutate(model = label)
+  out
+}
+```
+
+## Validation Metrics at Default Threshold (0.50)
+
+```{r metrics-50}
+val_knn_50 <- summarize_model(pred_knn, "KNN (0.50)")
+val_nb_50  <- summarize_model(pred_nb,  "NB  (0.50)")
+
+bind_rows(val_knn_50, val_nb_50) %>%
+  select(model, .metric, .estimate) %>%
+  pivot_wider(names_from = .metric, values_from = .estimate) %>%
+  mutate(across(-model, ~ round(.x, 3))) %>%
+  knitr::kable(caption = "Validation Metrics at 0.50 Threshold") %>%
+  kableExtra::kable_styling(full_width = FALSE)
+```
+
+## Threshold Calibration (Balanced Sensitivity/Specificity)
+
+```{r thresh-funs}
+pick_balanced_threshold <- function(df, truth, prob_col = ".pred_Yes") {
+  roc_df <- yardstick::roc_curve(
+    df,
+    !!rlang::sym(truth),
+    !!rlang::sym(prob_col),
+    event_level = "first"
+  )
+  roc_df %>%
+    dplyr::mutate(min_ss = pmin(sensitivity, specificity)) %>%
+    dplyr::arrange(dplyr::desc(min_ss)) %>%
+    dplyr::slice(1) %>%
+    dplyr::pull(.threshold)
+}
+
+apply_thresh <- function(df, th){
+  df %>%
+    dplyr::mutate(
+      pred_thresh = factor(
+        if_else(.pred_Yes >= th, "Yes","No"),
+        levels = c("Yes","No")
+      )
+    )
+}
+```
+
+```{r thresh-apply}
+th_knn_bal <- pick_balanced_threshold(pred_knn, targetcol)
+th_nb_bal  <- pick_balanced_threshold(pred_nb,  targetcol)
+
+pred_knn_t <- apply_thresh(pred_knn, th_knn_bal)
+pred_nb_t  <- apply_thresh(pred_nb,  th_nb_bal)
+
+balanced_results <- bind_rows(
+  cls_metrics(pred_knn_t, truth = .data[[targetcol]], estimate = pred_thresh,
+              event_level = "first") %>%
+    mutate(model = sprintf("KNN (th=%.2f)", th_knn_bal)),
+  cls_metrics(pred_nb_t,  truth = .data[[targetcol]], estimate = pred_thresh,
+              event_level = "first") %>%
+    mutate(model = sprintf("NB  (th=%.2f)", th_nb_bal))
+)
+
+balanced_results %>%
+  select(model, .metric, .estimate) %>%
+  pivot_wider(names_from = .metric, values_from = .estimate) %>%
+  mutate(across(-model, ~ round(.x, 3))) %>%
+  knitr::kable(caption = "Validation Metrics at Balanced Thresholds") %>%
+  kableExtra::kable_styling(full_width = FALSE)
+```
+
+## ROC Curves & Numerical Comparison
+
+```{r roc-curves}
+roc_knn <- yardstick::roc_curve(pred_knn, truth = !!rlang::sym(targetcol), .pred_Yes) %>%
+  dplyr::mutate(model = "KNN")
+roc_nb  <- yardstick::roc_curve(pred_nb,  truth = !!rlang::sym(targetcol), .pred_Yes) %>%
+  dplyr::mutate(model = "Naive Bayes")
+
+roc_df <- dplyr::bind_rows(roc_knn, roc_nb)
+
+ggplot(roc_df, aes(x = 1 - specificity, y = sensitivity, color = model)) +
+  geom_line(linewidth = 1.2) +
+  geom_abline(linetype = "dashed", color = "gray50") +
+  labs(title = "ROC Curve Comparison",
+       subtitle = "KNN vs Naive Bayes (Validation Set)",
+       x = "1 - Specificity (False Positive Rate)",
+       y = "Sensitivity (True Positive Rate)")
+```
+
+```{r numeric-summary}
+roc_auc_knn <- yardstick::roc_auc(pred_knn, truth = !!rlang::sym(targetcol), .pred_Yes)
+roc_auc_nb  <- yardstick::roc_auc(pred_nb,  truth = !!rlang::sym(targetcol), .pred_Yes)
+
+acc_knn  <- yardstick::accuracy(pred_knn, truth = !!rlang::sym(targetcol), estimate = pred_class)
+acc_nb   <- yardstick::accuracy(pred_nb,  truth = !!rlang::sym(targetcol), estimate = pred_class)
+
+sens_knn <- yardstick::sensitivity(pred_knn, truth = !!rlang::sym(targetcol), estimate = pred_class)
+sens_nb  <- yardstick::sensitivity(pred_nb,  truth = !!rlang::sym(targetcol), estimate = pred_class)
+
+spec_knn <- yardstick::specificity(pred_knn, truth = !!rlang::sym(targetcol), estimate = pred_class)
+spec_nb  <- yardstick::specificity(pred_nb,  truth = !!rlang::sym(targetcol), estimate = pred_class)
+
+results_summary <- tibble::tibble(
+  Model = c("KNN", "Naive Bayes"),
+  Accuracy = c(acc_knn$.estimate,  acc_nb$.estimate),
+  Sensitivity = c(sens_knn$.estimate, sens_nb$.estimate),
+  Specificity = c(spec_knn$.estimate, spec_nb$.estimate),
+  ROC_AUC = c(roc_auc_knn$.estimate, roc_auc_nb$.estimate)
+)
+
+results_summary %>%
+  mutate(across(-Model, ~ round(.x, 3))) %>%
+  knitr::kable(caption = "Model Comparison on Validation Set") %>%
+  kableExtra::kable_styling(full_width = FALSE)
+```
+
+# (Optional) Feature Importance via Logistic Regression
+
+A simple **logistic regression** (GLM) can provide coefficient-based interpretability. This section fits a GLM using the same recipe to understand which predictors are most associated with attrition. (This is **not** used for selection—only for interpretability.)
+
+```{r logistic-importance, eval=TRUE}
+log_spec <- logistic_reg(mode = "classification") %>% set_engine("glm")
+log_wf   <- workflow() %>% add_model(log_spec) %>% add_recipe(base_recipe)
+log_fit  <- fit(log_wf, data = train)
+
+log_fit_extracted <- extract_fit_parsnip(log_fit)
+
+log_coef <- tidy(log_fit_extracted) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(abs_estimate = abs(estimate)) %>%
+  arrange(desc(abs_estimate)) %>%
+  slice(1:15)
+
+ggplot(log_coef, aes(x = reorder(term, abs_estimate), y = abs_estimate, fill = estimate > 0)) +
+  geom_col(width = 0.7, show.legend = FALSE) +
+  coord_flip() +
+  scale_fill_manual(values = c("#F8766D", "#00BFC4")) +
+  labs(x = "Feature", y = "Absolute Coefficient Value",
+       title = "Top 15 Logistic Regression Coefficients (|Estimate|)")
+```
+
+# Conclusions
+
+- Both **KNN** and **Naive Bayes** are trained on a balanced (upsampled) training set and evaluated on a held-out validation set.  
+- Performance metrics are reported at both the default 0.5 threshold and at **balanced thresholds** that maximize the minimum of sensitivity and specificity.  
+- The **ROC curves** and table summarize comparative performance; choose the model that best satisfies the business constraints (e.g., minimum sensitivity/specificity of 0.60).  
+- Coefficient magnitudes from a simple **logistic regression** offer additional interpretability of drivers of attrition.
+
+# Appendix: Session Info
+
+```{r session-info}
+sessionInfo()
+```
