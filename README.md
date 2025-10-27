@@ -32,9 +32,14 @@ The goal was to identify key factors driving turnover and to build predictive mo
 
 ---
 
-## Presentation
-**Google Slides (with embedded videos):**  
-[View Presentation](https://docs.google.com/presentation/d/19NQwVb1t9N5s5d9-k88fBEGKKAFPwtQYlrlAjbw29wM/edit?usp=sharing)
+## Presentations
+
+Two presentation versions are included to meet project requirements:
+
+| Version | Description |
+|----------|--------------|
+| **Google Slides (with embedded videos)** | [View Presentation](https://docs.google.com/presentation/d/19NQwVb1t9N5s5d9-k88fBEGKKAFPwtQYlrlAjbw29wM/edit?usp=sharing) — includes video explanations that auto-play in slideshow mode. |
+| **Google Slides (static backup)** | [View Slideshow](https://docs.google.com/presentation/d/142IJL0vrXCFZd9pYbTaC7Oe0l73NvsGjkmT8WZInDn0/edit?usp=sharing) — version without embedded videos. |
 
 ---
 
@@ -44,7 +49,7 @@ The goal was to identify key factors driving turnover and to build predictive mo
 |------|--------------|
 | `CaseStudy1_Attrition_KNN_NB_Report.Rmd` | Full analysis and R code for both models |
 | `CaseStudy1_Attrition_KNN_NB_Report.html` | Rendered HTML report from the R Markdown file |
-| `Project_1_Presentation_Slides.pptx` | Backup copy of the Google Slides presentation |
+| `Project_1_Presentation_Slides.pptx` | Backup copy of the presentation slides |
 | `Case1PredictionsVandra_Attrition.csv` | Final predictions submitted for competition |
 | `README.md` | Repository overview and documentation |
 
